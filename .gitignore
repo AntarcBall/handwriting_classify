@@ -1,1 +1,6 @@
-writer_identification/models/best_writer_model.pth
+# Model files
+writer_identification/models/*.pth
+writer_identification/models/*.ckpt
+writer_identification/models/*.model
+writer_identification/models/*.h5
+writer_identification/models/*.pb
