@@ -8,6 +8,60 @@ from PIL import Image
 import os
 
 
+class ContentShiftTransform:
+    """
+    Custom transform to randomly shift the content (handwriting) within image boundaries
+    This prevents the model from learning from position tendencies
+    """
+    def __init__(self, max_shift_ratio=0.3):
+        """
+        Args:
+            max_shift_ratio: Maximum shift as a ratio of image dimensions (0.0 to 1.0)
+        """
+        self.max_shift_ratio = max_shift_ratio
+
+    def __call__(self, image):
+        img = image.copy()
+        h, w = img.shape[:2]
+        
+        # Find bounding box of non-background content (assuming black on white)
+        if len(img.shape) == 3:
+            gray_img = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+        else:
+            gray_img = img
+        
+        # Invert to find text regions (assuming text is dark)
+        _, thresh = cv2.threshold(gray_img, 10, 255, cv2.THRESH_BINARY_INV)
+        
+        # Find contours of text
+        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        if contours:
+            # Get bounding box of all text regions
+            all_points = np.concatenate(contours, axis=0)
+            x, y, w_cont, h_cont = cv2.boundingRect(all_points)
+            
+            # Calculate max possible shifts based on content size and image size
+            max_x_shift = int(min(x, w - (x + w_cont)) * self.max_shift_ratio)
+            max_y_shift = int(min(y, h - (y + h_cont)) * self.max_shift_ratio)
+            
+            # Random shifts
+            x_shift = np.random.randint(-max_x_shift, max_x_shift + 1)
+            y_shift = np.random.randint(-max_y_shift, max_y_shift + 1)
+            
+            # Create transformation matrix for shifting
+            M = np.float32([[1, 0, x_shift], [0, 1, y_shift]])
+            
+            # Apply shift
+            shifted_img = cv2.warpAffine(img, M, (w, h), borderMode=cv2.BORDER_CONSTANT, 
+                                         borderValue=(255, 255, 255))  # White background
+            
+            return shifted_img
+        else:
+            # If no content found, return original
+            return img
+
+
 class WriterIdentificationDataset(Dataset):
     """
     Custom dataset for writer identification with data augmentation
@@ -47,25 +101,33 @@ class WriterIdentificationDataset(Dataset):
         # Load image
         img_path = self.image_paths[idx]
         image = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
-
+        
         if image is None:
             raise ValueError(f"Could not load image from {img_path}")
-
+        
         # Convert grayscale to 3-channel for compatibility with pretrained models
         image = np.stack([image] * 3, axis=-1)
-
+        
         # Apply augmentation if available
         if self.augmentation_transform:
-            augmented = self.augmentation_transform(image=image)
-            image = augmented['image']
-
+            # Check if our custom transform is included
+            if isinstance(self.augmentation_transform, A.Compose):
+                # Apply albumentations transforms
+                augmented = self.augmentation_transform(image=image)
+                image = augmented['image']
+            else:
+                image = self.augmentation_transform(image=image)['image']
+        
         # Apply normalization transform
         if self.transform:
-            # Convert tensor back to numpy array if it's already a tensor due to augmentation
-            if torch.is_tensor(image):
-                image = image.permute(1, 2, 0).numpy()  # Convert from C, H, W to H, W, C
-            transformed = self.transform(image=image)
-            image = transformed['image']
+            # If image is already a tensor, we need to be careful
+            if isinstance(image, torch.Tensor):
+                # If image is already a tensor, return it as is
+                pass
+            else:
+                # Apply normalization transforms to numpy array
+                normalized = self.transform(image=image)
+                image = normalized['image']
 
         label = self.labels[idx]
         return image, label
@@ -86,6 +148,7 @@ def get_augmentation_transforms(input_size=(224, 224)):
     """
     Transforms with data augmentation for training (without normalization)
     """
+    # Compose transforms that include shifting content within the image
     return A.Compose([
         A.Resize(height=input_size[0], width=input_size[1]),
         A.Rotate(limit=20, p=0.8),  # Rotate by up to 20 degrees
@@ -115,7 +178,7 @@ def create_datasets(data_dir, input_size=(224, 224)):
         tuple: (train_dataset, val_dataset, test_dataset)
     """
     # Get transforms
-    train_transform = get_augmentation_transforms(input_size)
+    train_transform = get_base_transforms(input_size)
     val_test_transform = get_base_transforms(input_size)
     
     # Create full dataset

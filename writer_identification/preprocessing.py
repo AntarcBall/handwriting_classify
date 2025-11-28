@@ -49,89 +49,141 @@ def remove_background_noise(image_path, target_rgb=(202, 235, 253), threshold=30
     return binary
 
 
-def normalize_and_pad_image(image, target_width=None, target_height=64):
+def find_resized_max_dimensions(data_dir, target_height=64):
+    """
+    Find the maximum width after resizing all images to target height while maintaining aspect ratio.
+
+    Args:
+        data_dir (str): Directory containing class subdirectories (H-, M-, Z-)
+        target_height (int): Target height for normalization
+
+    Returns:
+        tuple: (max_width_after_resize, max_height_after_resize)
+    """
+    max_width_after_resize = 0
+
+    # Get all class directories
+    class_dirs = [d for d in os.listdir(data_dir)
+                  if os.path.isdir(os.path.join(data_dir, d))]
+
+    for class_dir in class_dirs:
+        input_class_path = os.path.join(data_dir, class_dir)
+
+        # Process all images in the class directory
+        for img_file in os.listdir(input_class_path):
+            if img_file.lower().endswith(('.png', '.jpg', '.jpeg')):
+                input_img_path = os.path.join(input_class_path, img_file)
+
+                img = cv2.imread(input_img_path, cv2.IMREAD_GRAYSCALE)
+                if img is not None:
+                    h, w = img.shape
+                    # Calculate width after resizing to target height while maintaining aspect ratio
+                    aspect_ratio = w / h
+                    new_width = int(target_height * aspect_ratio)
+                    max_width_after_resize = max(max_width_after_resize, new_width)
+
+    return max_width_after_resize, target_height
+
+
+def normalize_and_pad_image(image, max_width, target_height=64):
     """
     Normalize and pad images to maintain aspect ratio while having consistent dimensions.
-    
+    Following the exact specification: keep height constant and pad width to max_width.
+
     Args:
         image (numpy.ndarray): Input image
-        target_width (int): Target width (if None, will be calculated based on aspect ratio)
-        target_height (int): Target height (default 64)
-    
+        max_width (int): Maximum width across all images in dataset
+        target_height (int): Target height (default 64), height is kept constant
+
     Returns:
         numpy.ndarray: Padded and normalized image
     """
     h, w = image.shape
-    
-    # Calculate new dimensions maintaining aspect ratio
+
+    # Calculate the new width maintaining aspect ratio but keeping target_height
     aspect_ratio = w / h
     new_width = int(target_height * aspect_ratio)
-    
-    if target_width is None:
-        target_width = new_width
-    
+
     # Resize image while maintaining aspect ratio
     resized = cv2.resize(image, (new_width, target_height), interpolation=cv2.INTER_AREA)
-    
-    # Create a canvas of target dimensions
-    padded = np.full((target_height, target_width), 255, dtype=np.uint8)  # White background
-    
-    # Calculate position to center the resized image
-    x_offset = (target_width - new_width) // 2
-    padded[:, x_offset:x_offset + new_width] = resized
-    
+
+    # Make sure new_width doesn't exceed max_width due to rounding
+    # If it does, resize to fit within max_width while maintaining aspect ratio
+    if new_width > max_width:
+        # Resize to fit width within max_width while maintaining aspect ratio
+        scale_factor = max_width / new_width
+        adj_width = max_width
+        adj_height = int(target_height * scale_factor)
+        resized = cv2.resize(image, (adj_width, adj_height), interpolation=cv2.INTER_AREA)
+        # Pad to target dimensions
+        padded = np.full((target_height, max_width), 255, dtype=np.uint8)  # White background
+        y_offset = (target_height - adj_height) // 2  # Center vertically
+        padded[y_offset:y_offset + adj_height, :adj_width] = resized
+    else:
+        # Create a canvas with target height and max_width
+        padded = np.full((target_height, max_width), 255, dtype=np.uint8)  # White background
+        # Place the resized image on the left side (padding on the right)
+        # This maintains the aspect ratio but ensures all images have the same width
+        padded[:, :new_width] = resized
+
     return padded
 
 
-def preprocess_image(image_path, target_width=None, target_height=64):
+def preprocess_image(image_path, max_width, target_height=64):
     """
     Complete preprocessing pipeline: noise removal -> normalization -> padding
-    
+
     Args:
         image_path (str): Path to input image
-        target_width (int): Target width of the final image
-        target_height (int): Target height of the final image
-    
+        max_width (int): Maximum width across all images in dataset (for padding)
+        target_height (int): Target height for normalization
+
     Returns:
         numpy.ndarray: Preprocessed image ready for model input
     """
     # Step 1: Remove background noise and binarize
     binary_img = remove_background_noise(image_path)
-    
+
     # Step 2: Normalize and pad
-    processed_img = normalize_and_pad_image(binary_img, target_width, target_height)
-    
+    processed_img = normalize_and_pad_image(binary_img, max_width, target_height)
+
     return processed_img
 
 
 def process_dataset(data_dir, output_dir, target_height=64):
     """
     Process entire dataset by applying preprocessing pipeline to all images.
-    
+    First finds max dimensions after resizing to target height, then applies consistent padding.
+
     Args:
         data_dir (str): Directory containing class subdirectories (H-, M-, Z-)
         output_dir (str): Directory to save processed images
         target_height (int): Target height for normalization
     """
     os.makedirs(output_dir, exist_ok=True)
-    
+
+    # First, find max width after resizing all images to target height (maintaining aspect ratio)
+    print("Calculating maximum width after resizing to target height...")
+    max_width, max_height = find_resized_max_dimensions(data_dir, target_height)
+    print(f"Max width after resize: {max_width}, Target height: {max_height}")
+
     # Get all class directories
-    class_dirs = [d for d in os.listdir(data_dir) 
+    class_dirs = [d for d in os.listdir(data_dir)
                   if os.path.isdir(os.path.join(data_dir, d))]
-    
+
     for class_dir in class_dirs:
         input_class_path = os.path.join(data_dir, class_dir)
         output_class_path = os.path.join(output_dir, class_dir)
         os.makedirs(output_class_path, exist_ok=True)
-        
+
         # Process all images in the class directory
         for img_file in os.listdir(input_class_path):
             if img_file.lower().endswith(('.png', '.jpg', '.jpeg')):
                 input_img_path = os.path.join(input_class_path, img_file)
                 output_img_path = os.path.join(output_class_path, img_file)
-                
+
                 try:
-                    processed_img = preprocess_image(input_img_path, target_height=target_height)
+                    processed_img = preprocess_image(input_img_path, max_width, target_height)
                     cv2.imwrite(output_img_path, processed_img)
                     print(f"Processed: {input_img_path} -> {output_img_path}")
                 except Exception as e:
